@@ -16,6 +16,8 @@
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.3/dist/umd/supabase.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+    <!-- 구글 드라이브 API 연동을 위한 스크립트 추가 -->
+    <script src="https://apis.google.com/js/api.js"></script>
     
     <style>
         /* 요청사항: 전체 폰트 굴림체 통일 */
@@ -1025,43 +1027,16 @@
         let globalCentersData = []; // 센터별 비밀번호 및 정보 관리 배열
         let editingIssueId = null; // 수정 중인 특이사항 ID
 
+        // --- 구글 드라이브 연동 설정 ---
+        const GOOGLE_API_KEY = 'AIzaSyB8hwYm51vQ2Q_7zeiHisRJ3_qBLj7KwvA'; // ★ 수정 필수
+        let globalDriveImages = {}; // 구글 드라이브 매칭 이미지 매핑 (business_code -> url)
+
         let globalDispatchLatestData = []; // 가장 최신 배차 데이터 보관 (경로 생성용)
         let dynamicDrivers = []; // 최신 배차 기준 기사 목록 보관
         
         let isDriverAgreementModalOpen = false; // 동의서 모달 열림 상태 체크 (ESC 강제 종료 감지용)
 
-        // 추가: 구글 드라이브 연동용 변수 및 Fetch 함수
-        const GAS_DRIVE_IMG_URL = "https://script.google.com/macros/s/AKfycbx8oq-fhSE894PfjmpySKJ3sS4AvTOWrW5V8xKKLsTz1YHKgPkvbVHoM4MpjzNaNHYG/exec"; // 여기에 GAS 웹앱 URL을 입력하세요. (반드시 큰따옴표 안에 넣을 것)
-        let globalDriveImages = {};
-
-        async function fetchDriveImages() {
-            // URL이 입력되지 않았거나, "■" 그대로인 경우 에러를 막기 위해 실행 종료
-            if (GAS_DRIVE_IMG_URL === "https://script.google.com/macros/s/AKfycbz_mIiq3F9sBOa3uxdy_gR4ipZWBpLsGVCJrNL0xJmOeLmBBktyZVORIHkOzlAxg-zm/exec" || GAS_DRIVE_IMG_URL.trim() === "") return; 
-            try {
-                // 기존 캐시 데이터를 무시하고 항상 최신 데이터를 불러오도록 타임스탬프 쿼리를 추가합니다.
-                const fetchUrl = GAS_DRIVE_IMG_URL + "?t=" + new Date().getTime();
-                // 리다이렉션을 안정적으로 따라가도록 { redirect: 'follow' } 옵션 추가
-                const response = await fetch(fetchUrl, { redirect: 'follow' });
-                if (!response.ok) throw new Error("네트워크 응답이 올바르지 않습니다.");
-                
-                const data = await response.json();
-                
-                // GAS 내부에서 발생한 에러를 잡아내어 콘솔에 표출합니다.
-                if (data.error) {
-                    console.error("GAS 구글 스크립트 내부 에러 발생:", data.error);
-                    return;
-                }
-
-                if (data) {
-                    globalDriveImages = data;
-                    console.log("드라이브 이미지 매칭 완료:", Object.keys(data).length, "건");
-                }
-            } catch(e) {
-                console.error('드라이브 이미지 매칭 데이터 로드 실패:', e);
-            }
-        }
-
-        // 매일 16시 30분 기준으로 초기화 날짜(YYYY-MM-DD) 반환	
+        // 매일 16시 30분 기준으로 초기화 날짜(YYYY-MM-DD) 반환
         function getAgreementResetKey() {
             const now = new Date();
             const year = now.getFullYear();
@@ -1220,7 +1195,10 @@
             await fetchOrdersForIssueForm(); // 매칭용 주문데이터 불러오기
             await fetchDispatchForIssueForm(); // 매칭용 배차데이터 불러오기
             await fetchLatestDispatchForDrivers(); // 최신 배차 데이터 및 기사 목록 로드
-            await fetchDriveImages(); // 구글 드라이브 사진 매칭 데이터 로드
+
+            // 구글 드라이브 API 초기화 및 배차 데이터 기준 이미지 매칭
+            await initGoogleDriveAPI();
+            await mapDriveImagesToDispatch();
 
             // 작성일자 기본값을 today로 설정
             const writeDateInput = document.getElementById('writeDate');
@@ -1839,6 +1817,56 @@
             return Array.from(uniqueMap.values());
         }
 
+        // --- 구글 드라이브 연동 로직 ---
+        async function initGoogleDriveAPI() {
+            return new Promise((resolve) => {
+                gapi.load('client', async () => {
+                    try {
+                        await gapi.client.init({
+                            apiKey: GOOGLE_API_KEY,
+                            discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest']
+                        });
+                    } catch (e) { console.error("Google API Init Error:", e); }
+                    resolve();
+                });
+            });
+        }
+
+        async function mapDriveImagesToDispatch() {
+            if (!globalDispatchLatestData || globalDispatchLatestData.length === 0) return;
+            // 금일 배차 데이터에 있는 고유 매장코드 추출
+            const uniqueCodes = [...new Set(globalDispatchLatestData.map(d => d.business_code).filter(Boolean))];
+            globalDriveImages = {};
+
+            // 구글 드라이브 API 쿼리 길이 제한을 고려하여 10개 코드 단위로 청크 검색 (중첩 폴더 속성 무시하고 전체 검색)
+            const chunkSize = 10;
+            for (let i = 0; i < uniqueCodes.length; i += chunkSize) {
+                const chunk = uniqueCodes.slice(i, i + chunkSize);
+                // 파일명이 '매장코드'를 포함하는 이미지 파일만 검색
+                const queryParts = chunk.map(code => `name contains '${code}'`);
+                const query = `(${queryParts.join(' or ')}) and mimeType contains 'image/' and trashed = false`;
+
+                try {
+                    const response = await gapi.client.drive.files.list({
+                        q: query,
+                        fields: 'files(id, name)',
+                        spaces: 'drive'
+                    });
+                    const files = response.result.files;
+                    if (files && files.length > 0) {
+                        files.forEach(file => {
+                            const matchedCode = chunk.find(code => file.name.includes(code));
+                            if (matchedCode) {
+                                // 브라우저에서 크로스도메인 이슈 없이 직접 볼 수 있는 링크 구조
+                                globalDriveImages[matchedCode] = `https://drive.google.com/uc?export=view&id=${file.id}`;
+                            }
+                        });
+                    }
+                } catch (e) { console.error('Drive API Error:', e); }
+            }
+        }
+        // -------------------------------
+
         function renderDriverPreviewGrid() {
             const grid = document.getElementById('driverPreviewGrid');
             
@@ -1871,27 +1899,22 @@
                 const compAction = isCompleted ? 'onclick="event.stopPropagation()"' : `onclick="completeStore(event, '${s.id}', '${s.dbId}')"`;
                 const toggleAction = isCompleted ? '' : `onclick="toggleStoreDetail('${s.id}')"`;
 
-                // 마스킹 처리된 정보 가져오기
+               // 마스킹 처리된 정보 가져오기
                 const maskedInfo = maskDriverInfo(s.driver, s.phone);
 
-                // 구글 드라이브 이미지 매칭 및 작성된 특이사항(글로벌 이슈) 확인
-                const driveImg = globalDriveImages[s.code];
+                // 매칭 로직: 1순위 구글 드라이브 이미지, 2순위 수동 작성된 특이사항(globalIssues)
+                const driveImageUrl = globalDriveImages[s.code];
                 const matchedIssue = globalIssues.find(i => i.storeCode === s.code || i.storeName === s.name);
                 
                 let photoHtml = '<span class="text-[11px] text-gray-400 font-bold">특이사항 없음</span>';
-                let detailBtnHtml = `<button class="w-full py-4 text-gray-400 font-bold bg-gray-100 ios-btn text-sm relative z-10" disabled>특이사항 없음</button>`;
-                
-                if (driveImg) {
-                    // 드라이브 폴더에 매장코드(business_code)와 일치하는 사진이 있는 경우 (최우선순위)
-                    photoHtml = `<img src="${driveImg}" class="w-full h-full object-cover cursor-pointer" onclick="openImageViewer('${driveImg}')">`;
-                    detailBtnHtml = `<button onclick="openImageViewer('${driveImg}')" class="w-full py-4 text-[#007AFF] font-bold bg-blue-50 ios-btn text-sm relative z-10">사진 확대보기</button>`;
+                if (driveImageUrl) {
+                    photoHtml = `<img src="${driveImageUrl}" class="w-full h-full object-cover cursor-pointer" onclick="openImageViewer('${driveImageUrl}')">`;
                 } else if (matchedIssue && matchedIssue.photos && matchedIssue.photos.length > 0) {
-                    // 별도로 폼으로 작성된 사진이 있는 경우
                     photoHtml = `<img src="${matchedIssue.photos[0]}" class="w-full h-full object-cover cursor-pointer" onclick="openImageViewer('${matchedIssue.photos[0]}')">`;
                 }
 
-                // 폼으로 작성된 상세 내용이 있다면 버튼 내용을 덮어씌움 (사진 유무 상관없이 상세 내용 표출)
-                if (matchedIssue && (matchedIssue.reason || matchedIssue.details)) {
+                let detailBtnHtml = `<button class="w-full py-4 text-gray-400 font-bold bg-gray-100 ios-btn text-sm relative z-10" disabled>특이사항 없음</button>`;
+                if (matchedIssue) {
                     const safeReason = (matchedIssue.reason || '').replace(/'/g, "\\'");
                     const safeDetails = (matchedIssue.details || '').replace(/'/g, "\\'");
                     detailBtnHtml = `<button onclick="alert('사유: ${safeReason}\\n내용: ${safeDetails}')" class="w-full py-4 text-[#007AFF] font-bold bg-blue-50 ios-btn text-sm relative z-10">상세 특이사항 확인</button>`;
@@ -1950,21 +1973,32 @@ let storeExceptions = JSON.parse(localStorage.getItem('storeExceptions') || '{}'
             const storeList = Array.from(uniqueMap.values());
 
             const mappedData = storeList.map(d => {
+                // 드라이브 이미지 우선 적용, 없으면 수동 작성본 확인
                 const driveImg = globalDriveImages[d.business_code];
                 const issue = globalIssues.find(i => i.storeCode === d.business_code || i.storeName === d.business_name);
+                const issueHasPhoto = issue && issue.photos && issue.photos.length > 0;
                 
-                const hasDrivePhoto = !!driveImg;
-                const hasIssuePhoto = issue && issue.photos && issue.photos.length > 0;
-                const hasPhoto = hasDrivePhoto || hasIssuePhoto;
-                const photoUrl = hasDrivePhoto ? driveImg : (hasIssuePhoto ? issue.photos[0] : null);
+                const finalPhotoUrl = driveImg || (issueHasPhoto ? issue.photos[0] : null);
+                const isMatched = !!finalPhotoUrl;
+                
+                let statusText = '미등록 (누락)';
+                let statusColor = 'text-red-400';
+                if (driveImg) {
+                    statusText = '드라이브 매칭';
+                    statusColor = 'text-blue-500';
+                } else if (issueHasPhoto) {
+                    statusText = '수동 등록됨';
+                    statusColor = 'text-[#34C759]';
+                }
 
                 return {
                     code: d.business_code,
                     store: d.business_name,
-                    hasIssue: !!issue || hasDrivePhoto,
-                    hasPhoto: hasPhoto,
-                    photoUrl: photoUrl,
-                    exception: !!storeExceptions[d.business_code]
+                    hasPhoto: isMatched,
+                    photoUrl: finalPhotoUrl,
+                    exception: !!storeExceptions[d.business_code],
+                    statusText: statusText,
+                    statusColor: statusColor
                 };
             });
 
@@ -1977,16 +2011,16 @@ let storeExceptions = JSON.parse(localStorage.getItem('storeExceptions') || '{}'
 
             grid.innerHTML = filteredData.map(d => `
                 <div class="ios-card p-4 text-center ${d.exception ? 'opacity-40' : ''}" data-search="${d.code} ${d.store}">
-                    <div class="bg-gray-100 aspect-[3/4] ios-btn mb-3 flex items-center justify-center overflow-hidden">
+                    <div class="bg-gray-100 aspect-[3/4] ios-btn mb-3 flex items-center justify-center overflow-hidden border border-gray-200">
                         ${d.hasPhoto ? `
-                            <img src="${d.photoUrl}" class="w-full h-full object-cover cursor-pointer" onclick="openImageViewer('${d.photoUrl}')">
+                            <img src="${d.photoUrl}" class="w-full h-full object-cover cursor-pointer hover:scale-105 transition-transform" onclick="openImageViewer('${d.photoUrl}')">
                         ` : `
                             <span class="text-gray-400 font-bold text-[11px]">사진 없음</span>
                         `}
                     </div>
-                    <p class="text-[11px] font-bold truncate text-gray-800 mb-1">${d.store}</p>
-                    <p class="text-[8px] font-bold ${d.exception ? 'text-green-500' : (d.hasIssue ? (d.hasPhoto ? 'text-blue-500' : 'text-red-400') : 'text-gray-400')} mb-2">
-                        ${d.exception ? '자동 예외' : (d.hasIssue ? (d.hasPhoto ? '검증완료' : '사진누락') : '미등록')}
+                    <p class="text-[11px] font-bold truncate text-gray-800 mb-1">[${d.code}] ${d.store}</p>
+                    <p class="text-[9px] font-bold ${d.exception ? 'text-green-500' : d.statusColor} mb-2">
+                        ${d.exception ? '자동 예외' : d.statusText}
                     </p>
                     <button onclick="toggleException('${d.code}')" class="w-full py-2 ios-btn text-[9px] font-bold border ${d.exception ? 'bg-green-500 text-white border-green-500' : 'bg-white text-gray-400 border-gray-100'}">
                         예외 ${d.exception ? 'ON' : 'OFF'}
