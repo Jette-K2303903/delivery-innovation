@@ -1031,20 +1031,30 @@
         let isDriverAgreementModalOpen = false; // 동의서 모달 열림 상태 체크 (ESC 강제 종료 감지용)
 
         // 추가: 구글 드라이브 연동용 변수 및 Fetch 함수
-        const GAS_DRIVE_IMG_URL = "https://script.google.com/macros/s/AKfycbwO-Nht6ZfW4eQmzsVZ56cNm3Htj4TNimidzrmx1yaU7Lmf2UJwNJHFGdVDFv1ZF3UN/exec"; // 여기에 GAS 웹앱 URL을 입력하세요. (반드시 큰따옴표 안에 넣을 것)
+        const GAS_DRIVE_IMG_URL = "https://script.google.com/macros/s/AKfycbx8oq-fhSE894PfjmpySKJ3sS4AvTOWrW5V8xKKLsTz1YHKgPkvbVHoM4MpjzNaNHYG/exec"; // 여기에 GAS 웹앱 URL을 입력하세요. (반드시 큰따옴표 안에 넣을 것)
         let globalDriveImages = {};
 
         async function fetchDriveImages() {
             // URL이 입력되지 않았거나, "■" 그대로인 경우 에러를 막기 위해 실행 종료
-            if (GAS_DRIVE_IMG_URL === "■" || GAS_DRIVE_IMG_URL.trim() === "") return; 
+            if (GAS_DRIVE_IMG_URL === "https://script.google.com/macros/s/AKfycbz_mIiq3F9sBOa3uxdy_gR4ipZWBpLsGVCJrNL0xJmOeLmBBktyZVORIHkOzlAxg-zm/exec" || GAS_DRIVE_IMG_URL.trim() === "") return; 
             try {
+                // 기존 캐시 데이터를 무시하고 항상 최신 데이터를 불러오도록 타임스탬프 쿼리를 추가합니다.
+                const fetchUrl = GAS_DRIVE_IMG_URL + "?t=" + new Date().getTime();
                 // 리다이렉션을 안정적으로 따라가도록 { redirect: 'follow' } 옵션 추가
-                const response = await fetch(GAS_DRIVE_IMG_URL, { redirect: 'follow' });
+                const response = await fetch(fetchUrl, { redirect: 'follow' });
                 if (!response.ok) throw new Error("네트워크 응답이 올바르지 않습니다.");
                 
                 const data = await response.json();
+                
+                // GAS 내부에서 발생한 에러를 잡아내어 콘솔에 표출합니다.
+                if (data.error) {
+                    console.error("GAS 구글 스크립트 내부 에러 발생:", data.error);
+                    return;
+                }
+
                 if (data) {
                     globalDriveImages = data;
+                    console.log("드라이브 이미지 매칭 완료:", Object.keys(data).length, "건");
                 }
             } catch(e) {
                 console.error('드라이브 이미지 매칭 데이터 로드 실패:', e);
